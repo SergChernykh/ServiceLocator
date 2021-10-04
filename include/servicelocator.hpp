@@ -6,14 +6,11 @@
 #include <type_traits>
 #include <typeindex>
 #include <memory>
-#include <iostream>
+#include <mutex>
 
 //TODO: add asserts
-//TODO: remove debug logs
-//TODO: add mutex
 //TODO: refactore
 //TODO: implement like: context->item<Class>().as<Interface>().value(initial).add();
-//TODO: что если тип для хранения является shared_ptr, да и вообще указателем. UPD: сделал реализацию, работает, нужно поддержать просто указатели и зарефакторить
 
 namespace sl
 {
@@ -31,7 +28,7 @@ template<typename T>
 using pointer_t = decltype (*std::declval<T>());
 
 template<typename T>
-struct is_pointer_t<T, std::void_t<pointer_t<T>>> : std::true_type {};
+struct is_pointer_t<T, std::void_t<pointer_t<T>>> : public std::true_type {};
 
 template<typename T>
 inline constexpr bool is_pointer_v = is_pointer_t<T>::value;
@@ -64,22 +61,39 @@ public:
 template<typename From, typename To>
 class TResolver : public IResolver
 {
+public:
     std::any resolve(std::any *item) override
     {
         auto itemFrom = std::any_cast<From>(item);
         if (!itemFrom)
         {
-//            std::cout << "item from is nullptr" << std::endl;
             return {};
         }
 
-        if constexpr (traits::is_pointer_v<From> && traits::is_pointer_v<To>) // kostyl for smart pointers
+        if constexpr (traits::is_pointer_v<From> && traits::is_pointer_v<To>)
         {
-            return std::static_pointer_cast<traits::remove_pointer_t<To>>(*itemFrom); //TODO: вынести в отдельный хелпер
+            return pointerCast<To>(itemFrom);
         }
         else
         {
             return static_cast<To*>(itemFrom);
+        }
+    }
+
+private:
+
+    template<typename CastTo, typename CastFrom>
+    auto pointerCast(const CastFrom& value)
+    {
+        using UnderlyingTo = traits::remove_pointer_t<CastTo>;
+
+        if constexpr(std::is_same_v<To, std::shared_ptr<UnderlyingTo>>)
+        {
+            return std::static_pointer_cast<UnderlyingTo>(*value);
+        }
+        else
+        {
+            return static_cast<std::remove_reference_t<CastTo>>(value);
         }
     }
 };
@@ -102,7 +116,6 @@ public:
     auto get()
     {
         auto resolved = m_resolver->resolve(&m_value);
-        std::cout << "resolved has_value " << resolved.has_value() << " type name " << resolved.type().name() << std::endl;
 
         if constexpr (traits::is_pointer_v<T>)
         {
@@ -121,60 +134,70 @@ private:
     std::any m_value;
 };
 
-class ServiceLocatorImpl
+class ContextImpl
 {
 public:
     template<typename T>
     auto resolve()
     {
-        auto foundIt = m_items.find(std::type_index(typeid (T)));
+        std::lock_guard lock(m_mtx);
+
+        const auto foundIt = m_items.find(std::type_index(typeid (T)));
 
         if constexpr (traits::is_pointer_v<T>)
         {
-            return foundIt == m_items.end() ? nullptr : foundIt->second->get<T>();
+            return foundIt != m_items.end() ? foundIt->second->get<T>()
+                                            : nullptr;
         }
         else
         {
-            return foundIt == m_items.end() ? std::optional<std::reference_wrapper<T>> {} : foundIt->second->get<T>();
+            return foundIt != m_items.end() ? foundIt->second->get<T>()
+                                            : std::optional<std::reference_wrapper<T>> {};
         }
     }
 
     template<typename T>
-    void addItem(T&& value)
+    void addItem(T&& initial)
     {
-        addItemAs<T>(std::forward<T>(value));
+        addItemAs<T>(std::forward<T>(initial));
     }
 
-    template<typename As, typename T>
-    void addItemAs(T&& value)
+    template<typename Interface, typename T>
+    void addItemAs(T&& initial)
     {
-        static_assert (std::is_base_of_v<traits::remove_pointer_t<As>, traits::remove_pointer_t<T>>, "T must be derived from As type");
+        static_assert (std::is_base_of_v<traits::remove_pointer_t<Interface>, traits::remove_pointer_t<T>>, "T must be derived from Interface type");
+        static_assert (std::is_same_v<T, void>, "");
 
-        auto resolver = detail::makeResolver<T, As>();
-        auto item = std::make_any<T>(std::forward<T>(value));
-        auto typeIndex = std::type_index(typeid (As));
+        auto resolver = detail::makeResolver<T, Interface>();
+        auto value = std::make_any<T>(std::forward<T>(initial));
+        auto typeIndex = std::type_index(typeid (Interface));
 
-        auto newItem = std::make_unique<detail::Item>(std::move(resolver), std::move(item));
+        auto item = std::make_unique<detail::Item>(std::move(resolver), std::move(value));
 
-        m_items.insert({typeIndex, std::move(newItem)});
+        {
+            std::lock_guard lock(m_mtx);
+            m_items.insert({typeIndex, std::move(item)});
+        }
     }
 
 private:
     std::unordered_map<std::type_index, std::unique_ptr<detail::Item>> m_items;
+    std::mutex m_mtx;
 };
 
 }
 
-class ServiceLocator
+class Context
 {
 public:
-    ServiceLocator()
-        : m_impl(std::make_unique<detail::ServiceLocatorImpl>())
+    Context()
+        : m_impl(std::make_unique<detail::ContextImpl>())
     {
     }
 
     template<typename T>
-    [[nodiscard]] auto resolve()
+    [[nodiscard]]
+    auto resolve()
     {
         return m_impl->resolve<T>();
     }
@@ -185,16 +208,16 @@ public:
         m_impl->addItem(std::forward<T>(value));
     }
 
-    template<typename As, typename T>
+    template<typename Interface, typename T>
     void addItemAs(T&& value)
     {
-        m_impl->addItemAs<As>(std::forward<T>(value));
+        m_impl->addItemAs<Interface>(std::forward<T>(value));
     }
 
 private:
-    std::unique_ptr<detail::ServiceLocatorImpl> m_impl;
+    std::unique_ptr<detail::ContextImpl> m_impl;
 };
 
-using ServiceLocatorPtr = std::shared_ptr<ServiceLocator>;
+using ContextPtr = std::shared_ptr<Context>;
 
 }

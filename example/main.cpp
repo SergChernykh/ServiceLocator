@@ -73,7 +73,7 @@ private:
 
 int main()
 {
-    auto services = std::make_shared<sl::ServiceLocator>();
+    auto services = std::make_shared<sl::Context>();
 
     static_assert (std::is_same_v<IBar, sl::detail::traits::remove_pointer_t<std::shared_ptr<IBar>>>, "");
 
@@ -85,10 +85,19 @@ int main()
     services->addItemAs<std::shared_ptr<IBar>>(std::make_shared<Bar>());
     services->addItemAs<IBar>(Bar {});
 
+    Foo* foo1 = new Foo();
+    services->addItem(foo1);
+
     if (auto fooItem = services->resolve<Foo>())
     {
         const Foo& foo = fooItem.value();
         std::cout << foo.name() << std::endl;
+    }
+
+    if (auto fooItem = services->resolve<Foo*>())
+    {
+        Foo* foo = fooItem;
+        std::cout << foo->name() << std::endl;
     }
 
     if (auto fooItem = services->resolve<std::shared_ptr<IBar>>())
