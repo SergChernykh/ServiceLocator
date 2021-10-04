@@ -71,46 +71,49 @@ private:
     std::string m_name {"bar"};
 };
 
+template<typename T>
+void checkResolved(sl::ContextPtr ctx, std::string_view name)
+{
+    std::cout << std::boolalpha << "may be resolved by " << name << " : " << ctx->mayBeResolved<T>() << std::endl;
+}
+
+#define CHECK_RESOLVED(ctx, type) \
+    checkResolved<type>(ctx, #type);
+
 int main()
 {
-    auto services = std::make_shared<sl::Context>();
+    auto context = std::make_shared<sl::Context>();
 
-    static_assert (std::is_same_v<IBar, sl::detail::traits::remove_pointer_t<std::shared_ptr<IBar>>>, "");
+    Foo newFooItem{};
 
-    std::cout << "is a pointer: " << std::is_pointer_v<std::shared_ptr<IBar>> << std::endl;
-    std::cout << "is a pointer: " << sl::detail::traits::is_pointer_v<std::shared_ptr<IBar>> << std::endl;
+    context->addItem(newFooItem);
+    auto barItem = std::make_shared<Bar>();
+    context->addItemAs<std::shared_ptr<IBar>>(barItem);
+    context->addItemAs<IBar>(Bar {});
 
+    CHECK_RESOLVED(context, Bar);
+    CHECK_RESOLVED(context, IBar);
+    CHECK_RESOLVED(context, Foo);
+    CHECK_RESOLVED(context, std::shared_ptr<IBar>);
 
-    services->addItem(Foo {});
-    services->addItemAs<std::shared_ptr<IBar>>(std::make_shared<Bar>());
-    services->addItemAs<IBar>(Bar {});
-
-    Foo* foo1 = new Foo();
-    services->addItem(foo1);
-
-    if (auto fooItem = services->resolve<Foo>())
+    if (auto fooItem = context->resolve<Foo>())
     {
         const Foo& foo = fooItem.value();
-        std::cout << foo.name() << std::endl;
+        std::cout << "[resolve as ref] " << foo.name() << std::endl;
     }
 
-    if (auto fooItem = services->resolve<Foo*>())
-    {
-        Foo* foo = fooItem;
-        std::cout << foo->name() << std::endl;
-    }
+    barItem->setName("bar item");
 
-    if (auto fooItem = services->resolve<std::shared_ptr<IBar>>())
+    if (auto fooItem = context->resolve<std::shared_ptr<IBar>>())
     {
         std::shared_ptr<IBar> foo = fooItem;
-        std::cout << foo->name() << std::endl;
-        foo->setName("new bar");
+        std::cout << "[resolve as shared ptr by interface] " << foo->name() << std::endl;
     }
 
-    if (auto fooItem = services->resolve<IBar>())
+    if (auto fooItem = context->resolve<IBar>())
     {
         const IBar& foo = fooItem.value();
-        std::cout << foo.name() << std::endl;
+        std::cout << "[resolve as ref by interface] " << foo.name() << std::endl;
     }
 
     std::cout << "closing app" << std::endl;

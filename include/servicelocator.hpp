@@ -8,10 +8,6 @@
 #include <memory>
 #include <mutex>
 
-//TODO: add asserts
-//TODO: refactore
-//TODO: implement like: context->item<Class>().as<Interface>().value(initial).add();
-
 namespace sl
 {
 
@@ -21,31 +17,14 @@ namespace detail
 namespace traits
 {
 
-template<typename T, typename = std::void_t<>>
-struct is_pointer_t : public std::false_type {};
+template<typename T>
+struct is_shared_ptr : public std::false_type {};
 
 template<typename T>
-using pointer_t = decltype (*std::declval<T>());
+struct is_shared_ptr<std::shared_ptr<T>> : public std::true_type {};
 
 template<typename T>
-struct is_pointer_t<T, std::void_t<pointer_t<T>>> : public std::true_type {};
-
-template<typename T>
-inline constexpr bool is_pointer_v = is_pointer_t<T>::value;
-
-template<typename T>
-class remove_pointer
-{
-    template<typename U = T>
-    static auto test(int) -> std::remove_reference<pointer_t<U>>;
-    static auto test(...) -> std::remove_cv<T>;
-
-public:
-    using type = typename decltype(test(0))::type;
-};
-
-template<typename T>
-using remove_pointer_t = typename remove_pointer<T>::type;
+inline constexpr bool is_shared_ptr_v = is_shared_ptr<T>::value;
 
 }
 
@@ -70,30 +49,15 @@ public:
             return {};
         }
 
-        if constexpr (traits::is_pointer_v<From> && traits::is_pointer_v<To>)
+        if constexpr (traits::is_shared_ptr_v<To>)
         {
-            return pointerCast<To>(itemFrom);
+            static_assert (traits::is_shared_ptr_v<From>, "From type must be shared_ptr");
+
+            return std::static_pointer_cast<typename To::element_type>(*itemFrom);
         }
         else
         {
             return static_cast<To*>(itemFrom);
-        }
-    }
-
-private:
-
-    template<typename CastTo, typename CastFrom>
-    auto pointerCast(const CastFrom& value)
-    {
-        using UnderlyingTo = traits::remove_pointer_t<CastTo>;
-
-        if constexpr(std::is_same_v<To, std::shared_ptr<UnderlyingTo>>)
-        {
-            return std::static_pointer_cast<UnderlyingTo>(*value);
-        }
-        else
-        {
-            return static_cast<std::remove_reference_t<CastTo>>(value);
         }
     }
 };
@@ -117,7 +81,7 @@ public:
     {
         auto resolved = m_resolver->resolve(&m_value);
 
-        if constexpr (traits::is_pointer_v<T>)
+        if constexpr (traits::is_shared_ptr_v<T>)
         {
             return resolved.has_value() ? std::any_cast<T>(resolved)
                                         : nullptr;
@@ -144,7 +108,7 @@ public:
 
         const auto foundIt = m_items.find(std::type_index(typeid (T)));
 
-        if constexpr (traits::is_pointer_v<T>)
+        if constexpr (traits::is_shared_ptr_v<T>)
         {
             return foundIt != m_items.end() ? foundIt->second->get<T>()
                                             : nullptr;
@@ -157,19 +121,35 @@ public:
     }
 
     template<typename T>
+    bool mayBeResolved() const
+    {
+        return m_items.count(std::type_index(typeid (T))) > 0;
+    }
+
+    template<typename T>
     void addItem(T&& initial)
     {
         addItemAs<T>(std::forward<T>(initial));
     }
 
-    template<typename Interface, typename T>
-    void addItemAs(T&& initial)
+    template<typename T1, typename T2>
+    void addItemAs(T2&& initial)
     {
-        static_assert (std::is_base_of_v<traits::remove_pointer_t<Interface>, traits::remove_pointer_t<T>>, "T must be derived from Interface type");
-        static_assert (std::is_same_v<T, void>, "");
+        using Interface = std::decay_t<T1>;
+        using T = std::decay_t<T2>;
+
+        if constexpr (traits::is_shared_ptr_v<T>)
+        {
+            static_assert (traits::is_shared_ptr_v<Interface>, "Interface type must be shared_ptr");
+            static_assert (std::is_base_of_v<typename Interface::element_type, typename T::element_type>, "T must be derived from Interface type");
+        }
+        else
+        {
+            static_assert (std::is_base_of_v<Interface, T>, "T must be derived from Interface type");
+        }
 
         auto resolver = detail::makeResolver<T, Interface>();
-        auto value = std::make_any<T>(std::forward<T>(initial));
+        auto value = std::make_any<T>(std::forward<T2>(initial));
         auto typeIndex = std::type_index(typeid (Interface));
 
         auto item = std::make_unique<detail::Item>(std::move(resolver), std::move(value));
@@ -200,6 +180,13 @@ public:
     auto resolve()
     {
         return m_impl->resolve<T>();
+    }
+
+    template<typename T>
+    [[nodiscard]]
+    bool mayBeResolved() const
+    {
+        return m_impl->mayBeResolved<T>();
     }
 
     template<typename T>
